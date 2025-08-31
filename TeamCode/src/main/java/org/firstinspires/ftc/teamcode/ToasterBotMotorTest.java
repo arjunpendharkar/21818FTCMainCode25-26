@@ -8,6 +8,9 @@ import com.qualcomm.robotcore.hardware.DcMotor;
 import com.acmerobotics.dashboard.FtcDashboard;
 import com.acmerobotics.dashboard.telemetry.TelemetryPacket;
 
+import com.qualcomm.hardware.bosch.BNO055IMU;
+import org.firstinspires.ftc.robotcore.external.navigation.Orientation;
+
 @TeleOp(name = "Odometry + Drive Test")
 public class ToasterBotMotorTest extends LinearOpMode {
 
@@ -17,8 +20,12 @@ public class ToasterBotMotorTest extends LinearOpMode {
     // FTC Dashboard
     private FtcDashboard dashboard;
 
+    private BNO055IMU imu;
+    private Orientation angles;
+
     @Override
     public void runOpMode() {
+
         // Initialize Dashboard
         dashboard = FtcDashboard.getInstance();
 
@@ -43,6 +50,12 @@ public class ToasterBotMotorTest extends LinearOpMode {
         leftRear.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         rightRear.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
 
+        // Initialize IMU
+        imu = hardwareMap.get(BNO055IMU.class, "imu");
+        BNO055IMU.Parameters imuParameters = new BNO055IMU.Parameters();
+        imuParameters.angleUnit = BNO055IMU.AngleUnit.RADIANS;
+        imu.initialize(imuParameters);
+
         waitForStart();
 
         while (opModeIsActive()) {
@@ -64,14 +77,20 @@ public class ToasterBotMotorTest extends LinearOpMode {
             // --------------------
 
             // ODOMETRY READING
-            int leftOdometry = leftFront.getCurrentPosition();   // Left pod
+            int leftOdometry = leftRear.getCurrentPosition();   // Left pod
             int rightOdometry = rightFront.getCurrentPosition(); // Right pod
-            int centerOdometry = leftRear.getCurrentPosition();  // Center pod
+            int centerOdometry = leftFront.getCurrentPosition();  // Center pod
+
+            double x = -(centerOdometry / 1000.0);  // horizontal movement
+            double y = -((leftOdometry + rightOdometry) / 2000.0);
+
+            double heading = getHeadingRadians();
 
             // DS Telemetry
             telemetry.addData("Left Pod", leftOdometry);
             telemetry.addData("Right Pod", rightOdometry);
             telemetry.addData("Center Pod", centerOdometry);
+            telemetry.addData("Heading (rad)", heading);
             telemetry.update();
 
             // FTC Dashboard Telemetry
@@ -79,7 +98,19 @@ public class ToasterBotMotorTest extends LinearOpMode {
             packet.put("Left Pod", leftOdometry);
             packet.put("Right Pod", rightOdometry);
             packet.put("Center Pod", centerOdometry);
+            packet.put("X", x);
+            packet.put("Y", y);
+            packet.put("Heading (rad)", heading);
+
+            packet.fieldOverlay()
+                    .setFill("blue")
+                    .fillCircle(x, y, 3);
+
             dashboard.sendTelemetryPacket(packet);
         }
+    }
+
+    private double getHeadingRadians() {
+        return imu.getAngularOrientation().firstAngle;
     }
 }
