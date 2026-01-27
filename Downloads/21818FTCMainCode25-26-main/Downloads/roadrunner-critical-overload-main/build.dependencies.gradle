@@ -1,0 +1,19 @@
+dependencies {
+    // FTC SDK 11.0.0 dependencies
+    implementation 'org.firstinspires.ftc:Inspection:11.0.0'
+    implementation 'org.firstinspires.ftc:Blocks:11.0.0'
+    implementation 'org.firstinspires.ftc:RobotCore:11.0.0'
+    implementation 'org.firstinspires.ftc:RobotServer:11.0.0'
+    implementation 'org.firstinspires.ftc:OnBotJava:11.0.0'
+    implementation 'org.firstinspires.ftc:Hardware:11.0.0'
+    implementation 'org.firstinspires.ftc:FtcCommon:11.0.0'
+    // Vision library - Required for AprilTag detection, VisionPortal, and camera access
+    // Includes: VisionPortal, AprilTagProcessor, AprilTagDetection, WebcamName
+    implementation 'org.firstinspires.ftc:Vision:11.0.0'
+    
+    // AndroidX annotation library (for androidx.annotation.NonNull and other annotations)
+    implementation 'androidx.annotation:annotation:1.6.0'
+    
+    // Note: Dashboard dependency (com.acmerobotics.dashboard:dashboard:0.5.0) is in TeamCode/build.gradle
+    // This is the correct RoadRunner Dashboard package that matches the imports in the code
+}
