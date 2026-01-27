@@ -140,8 +140,8 @@ public class LimelightSeededOdometry extends LinearOpMode {
                 OdometryConstants.PINPOINT_OFFSET_DY_INCHES,
                 DistanceUnit.INCH);
 
-        // Use goBILDA 4-bar pods resolution; adjust if you use a different encoder
-        pinpoint.setEncoderResolution(GoBildaPinpointDriver.GoBildaOdometryPods.goBILDA_4_BAR_POD);
+        // Use goBILDA swingarm pods resolution (48mm wheel diameter)
+        pinpoint.setEncoderResolution(GoBildaPinpointDriver.GoBildaOdometryPods.goBILDA_SWINGARM_POD);
 
         // Ensure encoder directions increase forward (X pod) and left (Y pod)
         pinpoint.setEncoderDirections(

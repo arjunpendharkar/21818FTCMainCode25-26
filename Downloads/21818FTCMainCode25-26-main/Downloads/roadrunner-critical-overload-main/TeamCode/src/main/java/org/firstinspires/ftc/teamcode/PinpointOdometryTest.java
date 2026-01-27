@@ -36,6 +36,16 @@ public class PinpointOdometryTest extends LinearOpMode {
         pinpoint = hardwareMap.get(GoBildaPinpointDriver.class, "pinpoint");
         limelight = hardwareMap.get(Limelight3A.class, "limelight");
 
+        // Configure Pinpoint for 48mm swingarm pods
+        pinpoint.setOffsets(
+                OdometryConstants.PINPOINT_OFFSET_DX_INCHES,
+                OdometryConstants.PINPOINT_OFFSET_DY_INCHES,
+                DistanceUnit.INCH);
+        pinpoint.setEncoderResolution(GoBildaPinpointDriver.GoBildaOdometryPods.goBILDA_SWINGARM_POD);
+        pinpoint.setEncoderDirections(
+                GoBildaPinpointDriver.EncoderDirection.REVERSED,
+                GoBildaPinpointDriver.EncoderDirection.FORWARD);
+
         // Reset position + IMU so we start at (0,0,0)
         pinpoint.resetPosAndIMU();
 

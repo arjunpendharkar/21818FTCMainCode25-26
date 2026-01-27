@@ -40,7 +40,7 @@ public class DashboardTelemetryOpMode extends LinearOpMode {
                 OdometryConstants.PINPOINT_OFFSET_DX_INCHES,
                 OdometryConstants.PINPOINT_OFFSET_DY_INCHES,
                 DistanceUnit.INCH);
-        pinpoint.setEncoderResolution(GoBildaPinpointDriver.GoBildaOdometryPods.goBILDA_4_BAR_POD);
+        pinpoint.setEncoderResolution(GoBildaPinpointDriver.GoBildaOdometryPods.goBILDA_SWINGARM_POD);
         pinpoint.setEncoderDirections(
                 GoBildaPinpointDriver.EncoderDirection.FORWARD,
                 GoBildaPinpointDriver.EncoderDirection.FORWARD);
