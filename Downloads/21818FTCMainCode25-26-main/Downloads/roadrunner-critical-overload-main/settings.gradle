@@ -7,7 +7,22 @@ dependencyResolutionManagement {
         maven {
             url 'https://jitpack.io'
             // JitPack occasionally requires GitHub credentials. Set env vars if needed.
-            credentials {
+            credentials {dependencyResolutionManagement {
+                repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+                repositories {
+                    google()
+                    mavenCentral()
+
+                    // FTC Dashboard repo (fix: add trailing slash + explicit equals)
+                    maven { url = uri("https://maven.brott.dev/") }
+
+                    maven { url = uri("https://jitpack.io") }
+                }
+            }
+
+                rootProject.name = "roadrunner-critical-overload-main"
+                include ':FtcRobotController'
+                include ':TeamCode'
                 username = System.getenv("siddharthsanthosh1") ?: ""
                 password = System.getenv("jp_lrf5so6digjasrs3uoue92bklt") ?: ""
             }

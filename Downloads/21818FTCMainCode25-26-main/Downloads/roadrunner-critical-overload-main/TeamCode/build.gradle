@@ -25,5 +25,7 @@ android {
 
 dependencies {
     implementation project(':FtcRobotController')
-    implementation "com.acmerobotics.dashboard:dashboard:0.4.16"
+    implementation('com.acmerobotics.dashboard:dashboard:0.5.1') {
+        exclude group: 'org.firstinspires.ftc'
+    }
 }
