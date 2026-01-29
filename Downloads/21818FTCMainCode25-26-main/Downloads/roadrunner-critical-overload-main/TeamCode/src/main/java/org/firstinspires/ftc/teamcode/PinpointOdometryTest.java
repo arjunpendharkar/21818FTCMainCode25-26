@@ -8,6 +8,8 @@ import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
@@ -18,175 +20,189 @@ import org.firstinspires.ftc.robotcore.external.navigation.Position;
 @TeleOp(name = "LL Seed Once -> Pinpoint Odom + Dashboard", group = "Test")
 public class PinpointOdometryTest extends LinearOpMode {
 
+    // ---------------- HARDWARE ----------------
     private GoBildaPinpointDriver pinpoint;
     private Limelight3A limelight;
+    private DcMotor frontLeft, frontRight, backLeft, backRight;
 
-    // Limelight AprilTag pipeline + freshness thresholds
+    // ---------------- PINPOINT MOUNTING ----------------
+    // +X = left of robot center, -X = right
+    // +Y = forward of robot center, -Y = backward
+    private static final double PINPOINT_OFFSET_DX_IN = -6.5;
+    private static final double PINPOINT_OFFSET_DY_IN = -5.75;
+
+    // ---------------- LIMELIGHT ----------------
     private static final int APRILTAG_PIPELINE = 2;
     private static final long MAX_STALENESS_MS = 200;
-    private static final long SEED_TIMEOUT_MS = 1500; // wait up to this long at start for initial pose
+    private static final long SEED_TIMEOUT_MS = 1500;
 
-    // Dashboard drawing (inches)
+    // ---------------- DASHBOARD ----------------
     private static final double FIELD_SIZE_IN = 144.0;
     private static final double HALF_FIELD_IN = FIELD_SIZE_IN / 2.0;
 
-    // Robot: 18x16 rectangle, front is the longer side (18)
-    private static final double ROBOT_LENGTH_IN = 18.0; // front-to-back
-    private static final double ROBOT_WIDTH_IN  = 16.0; // left-to-right
+    private static final double ROBOT_LENGTH_IN = 18.0;
+    private static final double ROBOT_WIDTH_IN  = 16.0;
     private static final double ARROW_LEN_IN    = 10.0;
 
-    // Dots
-    private static final double DOT_R_IN = 1.5; // radius in inches
+    // ---------------- DRIVE TUNING ----------------
+    private static final double DEADBAND_FWD = 0.12;
+    private static final double DEADBAND_STRAFE = 0.05;
+    private static final double DEADBAND_ROT = 0.05;
+
+    // Snap-to-heading tuning
+    private static final double SNAP_KP = 0.012;       // power per degree of error (start here)
+    private static final double SNAP_MAX = 0.65;       // cap rotate power
+    private static final double SNAP_MIN = 0.08;       // minimum rotate to overcome stiction
+    private static final double SNAP_DONE_DEG = 2.0;   // consider "at target" within this many degrees
+
+    // Snap state
+    private boolean snapping = false;
+    private double snapTargetDeg = 0.0;
 
     @Override
     public void runOpMode() {
 
+        // ---------- HARDWARE ----------
         pinpoint = hardwareMap.get(GoBildaPinpointDriver.class, "pinpoint");
         limelight = hardwareMap.get(Limelight3A.class, "limelight");
 
-        // ---- Pinpoint configuration (your setup) ----
-        pinpoint.setOffsets(
-                OdometryConstants.PINPOINT_OFFSET_DX_INCHES,
-                OdometryConstants.PINPOINT_OFFSET_DY_INCHES,
-                DistanceUnit.INCH
-        );
+        frontLeft  = hardwareMap.get(DcMotor.class, "frontLeft");
+        frontRight = hardwareMap.get(DcMotor.class, "frontRight");
+        backLeft   = hardwareMap.get(DcMotor.class, "backLeft");
+        backRight  = hardwareMap.get(DcMotor.class, "backRight");
+
+        // Motor directions (typical mecanum)
+        frontLeft.setDirection(DcMotorSimple.Direction.REVERSE);
+        backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
+        frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        backRight.setDirection(DcMotorSimple.Direction.FORWARD);
+
+        // Brake (reduce glide)
+        frontLeft.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        frontRight.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        backLeft.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        backRight.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+
+        // ---------- PINPOINT CONFIG ----------
+        pinpoint.setOffsets(PINPOINT_OFFSET_DX_IN, PINPOINT_OFFSET_DY_IN, DistanceUnit.INCH);
         pinpoint.setEncoderResolution(GoBildaPinpointDriver.GoBildaOdometryPods.goBILDA_SWINGARM_POD);
         pinpoint.setEncoderDirections(
-                GoBildaPinpointDriver.EncoderDirection.REVERSED, // X
-                GoBildaPinpointDriver.EncoderDirection.FORWARD   // Y
+                GoBildaPinpointDriver.EncoderDirection.REVERSED,
+                GoBildaPinpointDriver.EncoderDirection.REVERSED
         );
 
-        // Start Limelight
+        // ---------- LIMELIGHT ----------
         limelight.pipelineSwitch(APRILTAG_PIPELINE);
         limelight.start();
 
-        // Reset Pinpoint to a known state BEFORE seeding
+        // Reset before seeding
         pinpoint.resetPosAndIMU();
 
         telemetry.addLine("Ready. Press START.");
-        telemetry.addLine("After START: seed once from Limelight (if fresh), then odometry-only.");
+        telemetry.addLine("Dpad snap: Right=90  Left=-90  Up=180  Down=0");
         telemetry.update();
-
         waitForStart();
 
-        // ---- SEED ONCE at start from Limelight ----
+        // ---------- SEED ONCE ----------
         Pose2D initialPose = waitForFreshLimelightPose(SEED_TIMEOUT_MS);
-        boolean seeded = false;
-
         if (initialPose != null) {
             pinpoint.setPosition(initialPose);
-            seeded = true;
         }
 
         FtcDashboard dashboard = FtcDashboard.getInstance();
 
         while (opModeIsActive()) {
 
-            // REQUIRED: update pinpoint every loop
+            // ---------- UPDATE ODOM ----------
             pinpoint.update();
 
-            // ---- Current Pinpoint pose (odometry-integrated) ----
-            double ppXIn = pinpoint.getPosX(DistanceUnit.INCH);
-            double ppYIn = pinpoint.getPosY(DistanceUnit.INCH);
-            double ppXM  = pinpoint.getPosX(DistanceUnit.METER);
-            double ppYM  = pinpoint.getPosY(DistanceUnit.METER);
-            double ppHeadingDeg = pinpoint.getHeading(AngleUnit.DEGREES);
+            // Combined heading (seeded from LL once, then odom integrated)
+            double headingDeg = pinpoint.getHeading(AngleUnit.DEGREES);
 
-            // ---- Current Limelight pose for display (does NOT override pinpoint) ----
-            Pose2D llPoseNow = getFreshLimelightPoseOnce();
-            boolean llFreshNow = (llPoseNow != null);
+            // ---------- DPAD SNAP TARGET ----------
+            if (gamepad1.dpad_right) { snapping = true; snapTargetDeg =  90.0; }
+            else if (gamepad1.dpad_left) { snapping = true; snapTargetDeg = -90.0; }
+            else if (gamepad1.dpad_up) { snapping = true; snapTargetDeg = 180.0; }
+            else if (gamepad1.dpad_down) { snapping = true; snapTargetDeg =   0.0; }
 
-            // ---------- FTC DASHBOARD FIELD ----------
+            // ---------- DRIVETRAIN INPUT ----------
+            double forward = -gamepad1.left_stick_y;
+            double strafe  =  gamepad1.left_stick_x;
+            double rotate  =  gamepad1.right_stick_x;
+
+            // Deadbands
+            if (Math.abs(forward) < DEADBAND_FWD) forward = 0;
+            if (Math.abs(strafe)  < DEADBAND_STRAFE) strafe = 0;
+            if (Math.abs(rotate)  < DEADBAND_ROT) rotate = 0;
+
+            // If snapping, override rotate with shortest-path controller
+            if (snapping) {
+                double errDeg = wrapDeg(snapTargetDeg - headingDeg); // shortest path error in [-180,180)
+
+                if (Math.abs(errDeg) <= SNAP_DONE_DEG) {
+                    // Close enough → stop snapping (let driver rotate again)
+                    snapping = false;
+                    rotate = 0;
+                } else {
+                    double cmd = SNAP_KP * errDeg;
+
+                    // Clamp
+                    cmd = clamp(cmd, -SNAP_MAX, SNAP_MAX);
+
+                    // Minimum power to overcome friction (keep sign)
+                    if (Math.abs(cmd) < SNAP_MIN) cmd = Math.copySign(SNAP_MIN, cmd);
+
+                    rotate = cmd;
+                }
+            }
+
+            // ---------- MECANUM MIX ----------
+            double fl = forward + strafe + rotate;
+            double fr = forward - strafe - rotate;
+            double bl = forward - strafe + rotate;
+            double br = forward + strafe - rotate;
+
+            double max = Math.max(1.0,
+                    Math.max(Math.abs(fl),
+                            Math.max(Math.abs(fr),
+                                    Math.max(Math.abs(bl), Math.abs(br)))));
+
+            frontLeft.setPower(fl / max);
+            frontRight.setPower(fr / max);
+            backLeft.setPower(bl / max);
+            backRight.setPower(br / max);
+
+            // ---------- POSE ----------
+            double xIn = pinpoint.getPosX(DistanceUnit.INCH);
+            double yIn = pinpoint.getPosY(DistanceUnit.INCH);
+
+            // ---------- DASHBOARD ----------
             TelemetryPacket packet = new TelemetryPacket();
             Canvas field = packet.fieldOverlay();
-
-            // field border + axes (origin at center)
             field.strokeRect(-HALF_FIELD_IN, -HALF_FIELD_IN, FIELD_SIZE_IN, FIELD_SIZE_IN);
-            field.strokeLine(-HALF_FIELD_IN, 0, HALF_FIELD_IN, 0);
-            field.strokeLine(0, -HALF_FIELD_IN, 0, HALF_FIELD_IN);
-
-            // robot (Pinpoint current)
-            drawRobotRect(field, ppXIn, ppYIn, ppHeadingDeg, ROBOT_LENGTH_IN, ROBOT_WIDTH_IN);
-            drawArrow(field, ppXIn, ppYIn, ppHeadingDeg, ARROW_LEN_IN);
-
-            // initial pose dot (seed)
-            if (initialPose != null) {
-                double ix = initialPose.getX(DistanceUnit.INCH);
-                double iy = initialPose.getY(DistanceUnit.INCH);
-                drawDot(field, ix, iy, DOT_R_IN);
-                packet.put("initial_x_in", ix);
-                packet.put("initial_y_in", iy);
-            } else {
-                packet.put("initial_pose", "null");
-            }
-
-            // limelight dot (current, if fresh)
-            if (llFreshNow) {
-                double lx = llPoseNow.getX(DistanceUnit.INCH);
-                double ly = llPoseNow.getY(DistanceUnit.INCH);
-                drawDot(field, lx, ly, DOT_R_IN);
-                packet.put("ll_x_in", lx);
-                packet.put("ll_y_in", ly);
-            } else {
-                packet.put("ll_fresh", false);
-            }
-
-            packet.put("pp_x_in", ppXIn);
-            packet.put("pp_y_in", ppYIn);
-            packet.put("pp_heading_deg", ppHeadingDeg);
-            packet.put("seeded", seeded);
-
+            drawRobotRect(field, xIn, yIn, headingDeg);
+            drawArrow(field, xIn, yIn, headingDeg);
+            packet.put("heading_deg", headingDeg);
+            packet.put("snapping", snapping);
+            packet.put("snap_target_deg", snapTargetDeg);
             dashboard.sendTelemetryPacket(packet);
-            // ---------- END DASHBOARD ----------
 
-            // ---------- DRIVER STATION TELEMETRY ----------
-            telemetry.addLine("=== INITIAL POSE (seed once at START) ===");
-            telemetry.addData("Seeded from LL", seeded ? "YES" : "NO");
-            if (initialPose != null) {
-                telemetry.addData("Init X (in)", "%.2f", initialPose.getX(DistanceUnit.INCH));
-                telemetry.addData("Init Y (in)", "%.2f", initialPose.getY(DistanceUnit.INCH));
-                telemetry.addData("Init X (m)", "%.3f", initialPose.getX(DistanceUnit.METER));
-                telemetry.addData("Init Y (m)", "%.3f", initialPose.getY(DistanceUnit.METER));
-                telemetry.addData("Init Heading (deg)", "%.1f", initialPose.getHeading(AngleUnit.DEGREES));
-            } else {
-                telemetry.addLine("Initial Pose: n/a (no fresh LL pose at start)");
-            }
-
-            telemetry.addLine("");
-            telemetry.addLine("=== LIMELIGHT (current, display only) ===");
-            telemetry.addData("LL pose fresh", llFreshNow ? "YES" : "NO");
-            if (llFreshNow) {
-                telemetry.addData("LL X (in)", "%.2f", llPoseNow.getX(DistanceUnit.INCH));
-                telemetry.addData("LL Y (in)", "%.2f", llPoseNow.getY(DistanceUnit.INCH));
-                telemetry.addData("LL X (m)", "%.3f", llPoseNow.getX(DistanceUnit.METER));
-                telemetry.addData("LL Y (m)", "%.3f", llPoseNow.getY(DistanceUnit.METER));
-                telemetry.addData("LL Heading (deg)", "%.1f", llPoseNow.getHeading(AngleUnit.DEGREES));
-            } else {
-                telemetry.addLine("LL Pose: n/a");
-            }
-
-            telemetry.addLine("");
-            telemetry.addLine("=== PINPOINT (current, odometry) ===");
-            telemetry.addData("X (in)", "%.2f", ppXIn);
-            telemetry.addData("Y (in)", "%.2f", ppYIn);
-            telemetry.addData("X (m)", "%.3f", ppXM);
-            telemetry.addData("Y (m)", "%.3f", ppYM);
-            telemetry.addData("Heading (deg)", "%.1f", ppHeadingDeg);
-
+            // ---------- TELEMETRY ----------
+            telemetry.addData("X (in)", "%.2f", xIn);
+            telemetry.addData("Y (in)", "%.2f", yIn);
+            telemetry.addData("Heading (deg)", "%.1f", headingDeg);
+            telemetry.addData("Snap", snapping ? ("ON -> " + snapTargetDeg) : "OFF");
             telemetry.update();
-            // ---------- END TELEMETRY ----------
         }
 
         limelight.stop();
     }
 
-    /**
-     * Wait up to timeoutMs for a fresh Limelight pose (blocking).
-     * Returns null if none arrives in time.
-     */
+    // ---------------- HELPERS ----------------
+
     private Pose2D waitForFreshLimelightPose(long timeoutMs) {
         long start = System.currentTimeMillis();
-        while (opModeIsActive() && (System.currentTimeMillis() - start) < timeoutMs) {
+        while (opModeIsActive() && System.currentTimeMillis() - start < timeoutMs) {
             Pose2D p = getFreshLimelightPoseOnce();
             if (p != null) return p;
             sleep(10);
@@ -194,93 +210,67 @@ public class PinpointOdometryTest extends LinearOpMode {
         return null;
     }
 
-    /**
-     * Non-blocking: returns a Pose2D only if Limelight has a fresh pose right now.
-     */
     private Pose2D getFreshLimelightPoseOnce() {
-        LLResult llResult = limelight.getLatestResult();
-        if (llResult == null || !llResult.isValid()) return null;
-
-        long stalenessMs = llResult.getStaleness();
-        if (stalenessMs < 0 || stalenessMs > MAX_STALENESS_MS) return null;
-
-        Pose3D botpose = llResult.getBotpose();
-        if (botpose == null) return null;
-
-        return toPose2D(botpose);
+        LLResult r = limelight.getLatestResult();
+        if (r == null || !r.isValid()) return null;
+        if (r.getStaleness() > MAX_STALENESS_MS) return null;
+        Pose3D p = r.getBotpose();
+        if (p == null) return null;
+        return toPose2D(p);
     }
 
-    /**
-     * Convert Limelight botpose (meters + degrees) into Pose2D in inches.
-     */
     private Pose2D toPose2D(Pose3D botpose) {
         Position p = botpose.getPosition();
-        double xIn = DistanceUnit.METER.toInches(p.x);
-        double yIn = DistanceUnit.METER.toInches(p.y);
-        double headingDeg = botpose.getOrientation().getYaw(AngleUnit.DEGREES);
-        return new Pose2D(DistanceUnit.INCH, xIn, yIn, AngleUnit.DEGREES, headingDeg);
-    }
-
-    // ---------------- Dashboard drawing helpers ----------------
-
-    private void drawDot(Canvas c, double x, double y, double r) {
-        // strokeCircle exists on dashboard Canvas
-        c.strokeCircle(x, y, r);
-    }
-
-    private void drawRobotRect(Canvas c, double cx, double cy, double headingDeg,
-                               double lengthIn, double widthIn) {
-
-        double h = Math.toRadians(headingDeg);
-
-        double hl = lengthIn / 2.0;
-        double hw = widthIn  / 2.0;
-
-        // forward unit vector (heading)
-        double fx = Math.cos(h);
-        double fy = Math.sin(h);
-
-        // left unit vector
-        double lx = -Math.sin(h);
-        double ly =  Math.cos(h);
-
-        // corners: front-left, front-right, back-right, back-left
-        double flx = cx + fx * hl + lx * hw;
-        double fly = cy + fy * hl + ly * hw;
-
-        double frx = cx + fx * hl - lx * hw;
-        double fry = cy + fy * hl - ly * hw;
-
-        double brx = cx - fx * hl - lx * hw;
-        double bry = cy - fy * hl - ly * hw;
-
-        double blx = cx - fx * hl + lx * hw;
-        double bly = cy - fy * hl + ly * hw;
-
-        c.strokePolyline(
-                new double[]{flx, frx, brx, blx, flx},
-                new double[]{fly, fry, bry, bly, fly}
+        return new Pose2D(
+                DistanceUnit.INCH,
+                DistanceUnit.METER.toInches(p.x),
+                DistanceUnit.METER.toInches(p.y),
+                AngleUnit.DEGREES,
+                botpose.getOrientation().getYaw(AngleUnit.DEGREES)
         );
     }
 
-    private void drawArrow(Canvas c, double x, double y, double headingDeg, double len) {
+    private static double clamp(double v, double lo, double hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+
+    // Wrap angle to [-180, 180)
+    private static double wrapDeg(double deg) {
+        deg = ((deg + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
+        return deg;
+    }
+
+    private void drawRobotRect(Canvas c, double cx, double cy, double headingDeg) {
         double h = Math.toRadians(headingDeg);
+        double hl = ROBOT_LENGTH_IN / 2.0;
+        double hw = ROBOT_WIDTH_IN / 2.0;
 
-        double x2 = x + len * Math.cos(h);
-        double y2 = y + len * Math.sin(h);
+        double fx = Math.cos(h), fy = Math.sin(h);
+        double lx = -Math.sin(h), ly = Math.cos(h);
 
-        c.strokeLine(x, y, x2, y2);
+        double[] xs = {
+                cx + fx*hl + lx*hw,
+                cx + fx*hl - lx*hw,
+                cx - fx*hl - lx*hw,
+                cx - fx*hl + lx*hw,
+                cx + fx*hl + lx*hw
+        };
 
-        // arrow head
-        double headLen = 4.0;
-        double headAngle = Math.toRadians(25);
+        double[] ys = {
+                cy + fy*hl + ly*hw,
+                cy + fy*hl - ly*hw,
+                cy - fy*hl - ly*hw,
+                cy - fy*hl + ly*hw,
+                cy + fy*hl + ly*hw
+        };
 
-        double lx = x2 - headLen * Math.cos(h - headAngle);
-        double ly = y2 - headLen * Math.sin(h - headAngle);
-        double rx = x2 - headLen * Math.cos(h + headAngle);
-        double ry = y2 - headLen * Math.sin(h + headAngle);
+        c.strokePolyline(xs, ys);
+    }
 
-        c.strokeLine(x2, y2, lx, ly);
-        c.strokeLine(x2, y2, rx, ry);
+    private void drawArrow(Canvas c, double x, double y, double headingDeg) {
+        double h = Math.toRadians(headingDeg);
+        c.strokeLine(x, y,
+                x + ARROW_LEN_IN * Math.cos(h),
+                y + ARROW_LEN_IN * Math.sin(h));
     }
 }
