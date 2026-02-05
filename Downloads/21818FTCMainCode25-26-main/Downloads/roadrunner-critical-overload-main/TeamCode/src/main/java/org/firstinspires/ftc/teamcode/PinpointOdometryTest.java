@@ -8,8 +8,10 @@ import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.hardware.Servo;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
@@ -23,11 +25,17 @@ public class PinpointOdometryTest extends LinearOpMode {
     // ---------------- HARDWARE ----------------
     private GoBildaPinpointDriver pinpoint;
     private Limelight3A limelight;
+
     private DcMotor frontLeft, frontRight, backLeft, backRight;
+    private DcMotor shootMotor;
+
+    // Continuous servos
+    private CRServo rightTransfer, leftTransfer, spindexServo;
+
+    // Positional servo
+    private Servo flywheelMover;
 
     // ---------------- PINPOINT MOUNTING ----------------
-    // +X = left of robot center, -X = right
-    // +Y = forward of robot center, -Y = backward
     private static final double PINPOINT_OFFSET_DX_IN = -6.5;
     private static final double PINPOINT_OFFSET_DY_IN = -5.75;
 
@@ -44,20 +52,30 @@ public class PinpointOdometryTest extends LinearOpMode {
     private static final double ROBOT_WIDTH_IN  = 16.0;
     private static final double ARROW_LEN_IN    = 10.0;
 
-    // ---------------- DRIVE TUNING ----------------
+    // ---------------- DRIVE ----------------
     private static final double DEADBAND_FWD = 0.12;
     private static final double DEADBAND_STRAFE = 0.05;
     private static final double DEADBAND_ROT = 0.05;
 
-    // Snap-to-heading tuning
-    private static final double SNAP_KP = 0.012;       // power per degree of error (start here)
-    private static final double SNAP_MAX = 0.65;       // cap rotate power
-    private static final double SNAP_MIN = 0.08;       // minimum rotate to overcome stiction
-    private static final double SNAP_DONE_DEG = 2.0;   // consider "at target" within this many degrees
+    // ---------------- TOGGLES ----------------
+    private boolean shooterOn = false;
+    private boolean transferOn = false;
+    private boolean spindexOn = false;
 
-    // Snap state
-    private boolean snapping = false;
-    private double snapTargetDeg = 0.0;
+    private boolean lastRT = false;
+    private boolean lastLT = false;
+
+    private boolean lastLB = false;
+    private boolean lastRB = false;
+
+    private boolean lastX = false;
+
+    private static final double TRIGGER_PRESSED = 0.60;
+
+    // ---------------- FLYWHEEL MOVER POSITIONS ----------------
+    // PLACEHOLDERS – tune later
+    private static final double FLYWHEEL_MOVER_POS_A = 0.20;
+    private static final double FLYWHEEL_MOVER_POS_B = 0.80;
 
     @Override
     public void runOpMode() {
@@ -71,19 +89,37 @@ public class PinpointOdometryTest extends LinearOpMode {
         backLeft   = hardwareMap.get(DcMotor.class, "backLeft");
         backRight  = hardwareMap.get(DcMotor.class, "backRight");
 
+        shootMotor = hardwareMap.get(DcMotor.class, "shootMotor");
+
+        // CRServos
+        rightTransfer = hardwareMap.get(CRServo.class, "rightTransfer");
+        leftTransfer  = hardwareMap.get(CRServo.class, "leftTransfer");
+        spindexServo  = hardwareMap.get(CRServo.class, "spindexServo");
+
+        // Positional servo
+        flywheelMover = hardwareMap.get(Servo.class, "flywheelMover");
+
         // Motor directions (typical mecanum)
         frontLeft.setDirection(DcMotorSimple.Direction.REVERSE);
         backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
-        frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
-        backRight.setDirection(DcMotorSimple.Direction.FORWARD);
+        shootMotor.setDirection(DcMotorSimple.Direction.REVERSE);
 
-        // Brake (reduce glide)
+        // ✅ BRAKE prevents drift when power=0
         frontLeft.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         frontRight.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         backLeft.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         backRight.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
 
-        // ---------- PINPOINT CONFIG ----------
+        // Shooter: brake when off
+        shootMotor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        shootMotor.setPower(0);
+
+        // Stop CRServos initially
+        rightTransfer.setPower(0);
+        leftTransfer.setPower(0);
+        spindexServo.setPower(0);
+
+        // ---------- PINPOINT ----------
         pinpoint.setOffsets(PINPOINT_OFFSET_DX_IN, PINPOINT_OFFSET_DY_IN, DistanceUnit.INCH);
         pinpoint.setEncoderResolution(GoBildaPinpointDriver.GoBildaOdometryPods.goBILDA_SWINGARM_POD);
         pinpoint.setEncoderDirections(
@@ -99,64 +135,81 @@ public class PinpointOdometryTest extends LinearOpMode {
         pinpoint.resetPosAndIMU();
 
         telemetry.addLine("Ready. Press START.");
-        telemetry.addLine("Dpad snap: Right=90  Left=-90  Up=180  Down=0");
+        telemetry.addLine("RT click = toggle shootMotor");
+        telemetry.addLine("LT click = toggle left/right transfers");
+        telemetry.addLine("LB/RB click = flywheelMover pos A/B");
+        telemetry.addLine("X click = toggle spindex");
         telemetry.update();
+
         waitForStart();
 
         // ---------- SEED ONCE ----------
         Pose2D initialPose = waitForFreshLimelightPose(SEED_TIMEOUT_MS);
+        boolean seeded = false;
         if (initialPose != null) {
             pinpoint.setPosition(initialPose);
+            seeded = true;
         }
 
         FtcDashboard dashboard = FtcDashboard.getInstance();
 
         while (opModeIsActive()) {
 
-            // ---------- UPDATE ODOM ----------
-            pinpoint.update();
+            // ---------- TRIGGER TOGGLES ----------
+            boolean rt = gamepad1.right_trigger > TRIGGER_PRESSED;
+            boolean lt = gamepad1.left_trigger  > TRIGGER_PRESSED;
 
-            // Combined heading (seeded from LL once, then odom integrated)
-            double headingDeg = pinpoint.getHeading(AngleUnit.DEGREES);
+            boolean rtClicked = rt && !lastRT;
+            boolean ltClicked = lt && !lastLT;
 
-            // ---------- DPAD SNAP TARGET ----------
-            if (gamepad1.dpad_right) { snapping = true; snapTargetDeg =  90.0; }
-            else if (gamepad1.dpad_left) { snapping = true; snapTargetDeg = -90.0; }
-            else if (gamepad1.dpad_up) { snapping = true; snapTargetDeg = 180.0; }
-            else if (gamepad1.dpad_down) { snapping = true; snapTargetDeg =   0.0; }
+            lastRT = rt;
+            lastLT = lt;
 
-            // ---------- DRIVETRAIN INPUT ----------
+            if (rtClicked) {
+                shooterOn = !shooterOn;
+                shootMotor.setPower(shooterOn ? 1.0 : 0.0);
+            }
+
+            if (ltClicked) {
+                transferOn = !transferOn;
+                if (transferOn) {
+                    rightTransfer.setPower(+1.0);
+                    leftTransfer.setPower(-1.0);
+                } else {
+                    rightTransfer.setPower(0.0);
+                    leftTransfer.setPower(0.0);
+                }
+            }
+
+            // ---------- SPINDEX TOGGLE (X) ----------
+            boolean xPressed = gamepad1.x;
+            boolean xClicked = xPressed && !lastX;
+            lastX = xPressed;
+
+            if (xClicked) {
+                spindexOn = !spindexOn;
+                spindexServo.setPower(spindexOn ? 1.0 : 0.0);
+            }
+
+            // ---------- FLYWHEEL MOVER (BUMPERS) ----------
+            boolean lbClicked = gamepad1.left_bumper && !lastLB;
+            boolean rbClicked = gamepad1.right_bumper && !lastRB;
+
+            lastLB = gamepad1.left_bumper;
+            lastRB = gamepad1.right_bumper;
+
+            if (lbClicked) flywheelMover.setPosition(FLYWHEEL_MOVER_POS_A);
+            if (rbClicked) flywheelMover.setPosition(FLYWHEEL_MOVER_POS_B);
+
+            // ---------- DRIVE ----------
             double forward = -gamepad1.left_stick_y;
             double strafe  =  gamepad1.left_stick_x;
             double rotate  =  gamepad1.right_stick_x;
 
-            // Deadbands
             if (Math.abs(forward) < DEADBAND_FWD) forward = 0;
-            if (Math.abs(strafe)  < DEADBAND_STRAFE) strafe = 0;
-            if (Math.abs(rotate)  < DEADBAND_ROT) rotate = 0;
+            if (Math.abs(strafe) < DEADBAND_STRAFE) strafe = 0;
+            if (Math.abs(rotate) < DEADBAND_ROT) rotate = 0;
 
-            // If snapping, override rotate with shortest-path controller
-            if (snapping) {
-                double errDeg = wrapDeg(snapTargetDeg - headingDeg); // shortest path error in [-180,180)
-
-                if (Math.abs(errDeg) <= SNAP_DONE_DEG) {
-                    // Close enough → stop snapping (let driver rotate again)
-                    snapping = false;
-                    rotate = 0;
-                } else {
-                    double cmd = SNAP_KP * errDeg;
-
-                    // Clamp
-                    cmd = clamp(cmd, -SNAP_MAX, SNAP_MAX);
-
-                    // Minimum power to overcome friction (keep sign)
-                    if (Math.abs(cmd) < SNAP_MIN) cmd = Math.copySign(SNAP_MIN, cmd);
-
-                    rotate = cmd;
-                }
-            }
-
-            // ---------- MECANUM MIX ----------
             double fl = forward + strafe + rotate;
             double fr = forward - strafe - rotate;
             double bl = forward - strafe + rotate;
@@ -172,34 +225,52 @@ public class PinpointOdometryTest extends LinearOpMode {
             backLeft.setPower(bl / max);
             backRight.setPower(br / max);
 
-            // ---------- POSE ----------
+            // ---------- ODOM ----------
+            pinpoint.update();
             double xIn = pinpoint.getPosX(DistanceUnit.INCH);
             double yIn = pinpoint.getPosY(DistanceUnit.INCH);
+            double heading = pinpoint.getHeading(AngleUnit.DEGREES);
 
             // ---------- DASHBOARD ----------
             TelemetryPacket packet = new TelemetryPacket();
             Canvas field = packet.fieldOverlay();
             field.strokeRect(-HALF_FIELD_IN, -HALF_FIELD_IN, FIELD_SIZE_IN, FIELD_SIZE_IN);
-            drawRobotRect(field, xIn, yIn, headingDeg);
-            drawArrow(field, xIn, yIn, headingDeg);
-            packet.put("heading_deg", headingDeg);
-            packet.put("snapping", snapping);
-            packet.put("snap_target_deg", snapTargetDeg);
+            drawRobotRect(field, xIn, yIn, heading);
+            drawArrow(field, xIn, yIn, heading);
+
+            packet.put("seeded", seeded);
+            packet.put("x_in", xIn);
+            packet.put("y_in", yIn);
+            packet.put("heading_deg", heading);
+            packet.put("shooterOn", shooterOn);
+            packet.put("transferOn", transferOn);
+            packet.put("spindexOn", spindexOn);
+
             dashboard.sendTelemetryPacket(packet);
 
             // ---------- TELEMETRY ----------
+            telemetry.addData("BRAKE", "ENABLED");
             telemetry.addData("X (in)", "%.2f", xIn);
             telemetry.addData("Y (in)", "%.2f", yIn);
-            telemetry.addData("Heading (deg)", "%.1f", headingDeg);
-            telemetry.addData("Snap", snapping ? ("ON -> " + snapTargetDeg) : "OFF");
+            telemetry.addData("Heading (deg)", "%.1f", heading);
+            telemetry.addData("Seeded", seeded ? "YES" : "NO");
+            telemetry.addData("Shooter", shooterOn ? "ON" : "OFF");
+            telemetry.addData("Transfer", transferOn ? "ON" : "OFF");
+            telemetry.addData("Spindex", spindexOn ? "ON" : "OFF");
+            telemetry.addData("FlywheelMoverPos", "%.2f", flywheelMover.getPosition());
             telemetry.update();
         }
+
+        // stop everything on exit
+        shootMotor.setPower(0);
+        rightTransfer.setPower(0);
+        leftTransfer.setPower(0);
+        spindexServo.setPower(0);
 
         limelight.stop();
     }
 
-    // ---------------- HELPERS ----------------
-
+    // ---------------- LIMELIGHT HELPERS ----------------
     private Pose2D waitForFreshLimelightPose(long timeoutMs) {
         long start = System.currentTimeMillis();
         while (opModeIsActive() && System.currentTimeMillis() - start < timeoutMs) {
@@ -230,16 +301,7 @@ public class PinpointOdometryTest extends LinearOpMode {
         );
     }
 
-    private static double clamp(double v, double lo, double hi) {
-        return Math.max(lo, Math.min(hi, v));
-    }
-
-    // Wrap angle to [-180, 180)
-    private static double wrapDeg(double deg) {
-        deg = ((deg + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
-        return deg;
-    }
-
+    // ---------------- DASHBOARD DRAWING ----------------
     private void drawRobotRect(Canvas c, double cx, double cy, double headingDeg) {
         double h = Math.toRadians(headingDeg);
         double hl = ROBOT_LENGTH_IN / 2.0;
