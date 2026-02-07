@@ -12,6 +12,7 @@ import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
@@ -60,7 +61,6 @@ public class PinpointOdometryTest extends LinearOpMode {
     // ---------------- TOGGLES ----------------
     private boolean shooterOn = false;
     private boolean transferOn = false;
-    private boolean spindexOn = false;
 
     private boolean lastRT = false;
     private boolean lastLT = false;
@@ -68,14 +68,42 @@ public class PinpointOdometryTest extends LinearOpMode {
     private boolean lastLB = false;
     private boolean lastRB = false;
 
-    private boolean lastX = false;
-
     private static final double TRIGGER_PRESSED = 0.60;
 
     // ---------------- FLYWHEEL MOVER POSITIONS ----------------
     // PLACEHOLDERS – tune later
     private static final double FLYWHEEL_MOVER_POS_A = 0.20;
     private static final double FLYWHEEL_MOVER_POS_B = 0.80;
+
+    // ============================================================
+    //                 SPINDEX (TIMED PULSE ON X)
+    // ============================================================
+    private static final double SPIN_POWER = 0.25;
+    private static final double STOP_POWER = 0.0;
+    private static final double[] RUN_TIMES = {0.20, 0.24, 0.23, 0.26, 0.25};
+
+    private boolean spindexSpinning = false;
+    private final ElapsedTime spindexTimer = new ElapsedTime();
+    private int spindexRunIndex = 0;
+    private boolean xArmed = true;
+
+    private DcMotor intakeMotor;
+    private boolean intakeOn = false;
+    private boolean lastB = false;
+
+    private static final double SHOOTER_POWER = 0.9; // change this
+
+    // ============================================================
+    //                 FIELD-CENTRIC TUNING
+    // ============================================================
+    // Your desired field convention:
+    //   stick forward -> toward field -X
+    //   stick right   -> toward field +Y
+    //   stick left    -> toward field -Y
+    //
+    // If it feels mirrored/rotated, flip these:
+    private static final int HEADING_SIGN = -1;            // flip to +1 if needed
+    private static final double HEADING_OFFSET_DEG = 180.0; // change to 0.0 if needed
 
     @Override
     public void runOpMode() {
@@ -110,6 +138,11 @@ public class PinpointOdometryTest extends LinearOpMode {
         backLeft.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         backRight.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
 
+        intakeMotor = hardwareMap.get(DcMotor.class, "intakeMotor");
+        intakeMotor.setDirection(DcMotorSimple.Direction.FORWARD);
+        intakeMotor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        intakeMotor.setPower(0);
+
         // Shooter: brake when off
         shootMotor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         shootMotor.setPower(0);
@@ -138,7 +171,8 @@ public class PinpointOdometryTest extends LinearOpMode {
         telemetry.addLine("RT click = toggle shootMotor");
         telemetry.addLine("LT click = toggle left/right transfers");
         telemetry.addLine("LB/RB click = flywheelMover pos A/B");
-        telemetry.addLine("X click = toggle spindex");
+        telemetry.addLine("B click = toggle intakeMotor");
+        telemetry.addLine("X press = timed spindex pulse");
         telemetry.update();
 
         waitForStart();
@@ -167,7 +201,7 @@ public class PinpointOdometryTest extends LinearOpMode {
 
             if (rtClicked) {
                 shooterOn = !shooterOn;
-                shootMotor.setPower(shooterOn ? 1.0 : 0.0);
+                shootMotor.setPower(shooterOn ? SHOOTER_POWER : 0.0);
             }
 
             if (ltClicked) {
@@ -181,16 +215,6 @@ public class PinpointOdometryTest extends LinearOpMode {
                 }
             }
 
-            // ---------- SPINDEX TOGGLE (X) ----------
-            boolean xPressed = gamepad1.x;
-            boolean xClicked = xPressed && !lastX;
-            lastX = xPressed;
-
-            if (xClicked) {
-                spindexOn = !spindexOn;
-                spindexServo.setPower(spindexOn ? 1.0 : 0.0);
-            }
-
             // ---------- FLYWHEEL MOVER (BUMPERS) ----------
             boolean lbClicked = gamepad1.left_bumper && !lastLB;
             boolean rbClicked = gamepad1.right_bumper && !lastRB;
@@ -201,14 +225,77 @@ public class PinpointOdometryTest extends LinearOpMode {
             if (lbClicked) flywheelMover.setPosition(FLYWHEEL_MOVER_POS_A);
             if (rbClicked) flywheelMover.setPosition(FLYWHEEL_MOVER_POS_B);
 
-            // ---------- DRIVE ----------
-            double forward = -gamepad1.left_stick_y;
-            double strafe  =  gamepad1.left_stick_x;
-            double rotate  =  gamepad1.right_stick_x;
+            // ---------- INTAKE TOGGLE (B) ----------
+            boolean bPressed = gamepad1.b;
+            boolean bClicked = bPressed && !lastB;
+            lastB = bPressed;
 
-            if (Math.abs(forward) < DEADBAND_FWD) forward = 0;
-            if (Math.abs(strafe) < DEADBAND_STRAFE) strafe = 0;
-            if (Math.abs(rotate) < DEADBAND_ROT) rotate = 0;
+            if (bClicked) {
+                intakeOn = !intakeOn;
+                intakeMotor.setPower(intakeOn ? 1.0 : 0.0);
+            }
+
+            // ============================================================
+            //             SPINDEX TIMED PULSE (X BUTTON)
+            // ============================================================
+            boolean xPressed = gamepad1.x;
+
+            // re-arm when released
+            if (!xPressed) xArmed = true;
+
+            // start pulse on new press (armed) if not already spinning
+            if (xPressed && xArmed && !spindexSpinning) {
+                spindexSpinning = true;
+                spindexTimer.reset();
+                xArmed = false;
+            }
+
+            if (spindexSpinning) {
+                double runTime = RUN_TIMES[spindexRunIndex];
+                if (spindexTimer.seconds() >= runTime) {
+                    spindexServo.setPower(STOP_POWER);
+                    spindexSpinning = false;
+                    spindexRunIndex = (spindexRunIndex + 1) % RUN_TIMES.length;
+                } else {
+                    spindexServo.setPower(SPIN_POWER);
+                }
+            } else {
+                spindexServo.setPower(STOP_POWER);
+            }
+            // ============================================================
+
+            // ---------- ODOM ----------
+            pinpoint.update();
+            double xIn = pinpoint.getPosX(DistanceUnit.INCH);
+            double yIn = pinpoint.getPosY(DistanceUnit.INCH);
+            double heading = pinpoint.getHeading(AngleUnit.DEGREES);
+
+            // ============================================================
+            //                 FIELD-CENTRIC DRIVE (ONLY DRIVE CHANGE)
+            // ============================================================
+            double stickForward = -gamepad1.left_stick_y; // push forward => +
+            double stickStrafe  =  gamepad1.left_stick_x; // push right   => +
+            double rotate       =  gamepad1.right_stick_x;
+
+            if (Math.abs(stickForward) < DEADBAND_FWD) stickForward = 0;
+            if (Math.abs(stickStrafe)  < DEADBAND_STRAFE) stickStrafe = 0;
+            if (Math.abs(rotate)       < DEADBAND_ROT) rotate = 0;
+
+            // Rotate field vector into robot frame using Pinpoint heading
+            double h = Math.toRadians(HEADING_SIGN * (heading + HEADING_OFFSET_DEG));
+            double cos = Math.cos(h);
+            double sin = Math.sin(h);
+
+            // Field vector: x = strafe, y = forward
+            double xField = stickStrafe;
+            double yField = stickForward;
+
+            // Field -> Robot
+            double xRobot = xField * cos - yField * sin;   // robot strafe
+            double yRobot = xField * sin + yField * cos;   // robot forward
+
+            double forward = yRobot;
+            double strafe  = xRobot;
 
             double fl = forward + strafe + rotate;
             double fr = forward - strafe - rotate;
@@ -224,12 +311,7 @@ public class PinpointOdometryTest extends LinearOpMode {
             frontRight.setPower(fr / max);
             backLeft.setPower(bl / max);
             backRight.setPower(br / max);
-
-            // ---------- ODOM ----------
-            pinpoint.update();
-            double xIn = pinpoint.getPosX(DistanceUnit.INCH);
-            double yIn = pinpoint.getPosY(DistanceUnit.INCH);
-            double heading = pinpoint.getHeading(AngleUnit.DEGREES);
+            // ============================================================
 
             // ---------- DASHBOARD ----------
             TelemetryPacket packet = new TelemetryPacket();
@@ -244,7 +326,8 @@ public class PinpointOdometryTest extends LinearOpMode {
             packet.put("heading_deg", heading);
             packet.put("shooterOn", shooterOn);
             packet.put("transferOn", transferOn);
-            packet.put("spindexOn", spindexOn);
+            packet.put("spindexRunning", spindexSpinning);
+            packet.put("spindexRunTime", RUN_TIMES[spindexRunIndex]);
 
             dashboard.sendTelemetryPacket(packet);
 
@@ -256,8 +339,10 @@ public class PinpointOdometryTest extends LinearOpMode {
             telemetry.addData("Seeded", seeded ? "YES" : "NO");
             telemetry.addData("Shooter", shooterOn ? "ON" : "OFF");
             telemetry.addData("Transfer", transferOn ? "ON" : "OFF");
-            telemetry.addData("Spindex", spindexOn ? "ON" : "OFF");
-            telemetry.addData("FlywheelMoverPos", "%.2f", flywheelMover.getPosition());
+            telemetry.addData("Intake", intakeOn ? "ON" : "OFF");
+            telemetry.addData("Spindexer Running", spindexSpinning);
+            telemetry.addData("Spindex Run Time (s)", "%.2f", RUN_TIMES[spindexRunIndex]);
+            telemetry.addData("FlywheelMover Pos", "%.2f", flywheelMover.getPosition());
             telemetry.update();
         }
 
@@ -266,6 +351,7 @@ public class PinpointOdometryTest extends LinearOpMode {
         rightTransfer.setPower(0);
         leftTransfer.setPower(0);
         spindexServo.setPower(0);
+        intakeMotor.setPower(0);
 
         limelight.stop();
     }
